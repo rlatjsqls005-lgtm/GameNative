@@ -78,18 +78,38 @@ jobs:
           split -b 170M -d -a 2 GameNative-USB-Fix-Fresh.apk GameNative-USB-Fix-Fresh.apk.part-
           ls -lh GameNative-USB-Fix-Fresh.apk*
 
-      - name: Upload full APK
+      - name: Upload checksum
         uses: actions/upload-artifact@v4
         with:
-          name: GameNative-USB-Fix-Fresh-SIGNED
-          path: |
-            source/GameNative-USB-Fix-Fresh.apk
-            source/GameNative-USB-Fix-Fresh.sha256
+          name: fresh-checksum
+          path: source/GameNative-USB-Fix-Fresh.sha256
           retention-days: 14
 
-      - name: Upload delivery parts
+      - name: Upload part 00
         uses: actions/upload-artifact@v4
         with:
-          name: GameNative-USB-Fix-Fresh-PARTS
-          path: source/GameNative-USB-Fix-Fresh.apk.part-*
+          name: fresh-part-00
+          path: source/GameNative-USB-Fix-Fresh.apk.part-00
+          retention-days: 14
+
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-part-01
+          path: source/GameNative-USB-Fix-Fresh.apk.part-01
+          retention-days: 14
+
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-part-02
+          path: source/GameNative-USB-Fix-Fresh.apk.part-02
+          retention-days: 14
+
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-part-03
+          path: source/GameNative-USB-Fix-Fresh.apk.part-03
+          if-no-files-found: ignore
           retention-days: 14
