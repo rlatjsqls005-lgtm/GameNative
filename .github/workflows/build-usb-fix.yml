@@ -1,11 +1,10 @@
-name: Build USB OTG Fix APK
+name: Rebuild USB OTG Fix From Scratch
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
     paths:
       - '.github/workflows/build-usb-fix.yml'
-      - '.github/scripts/patch_usb_fix.py'
   workflow_dispatch:
 
 permissions:
@@ -17,14 +16,20 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout pristine upstream GameNative
+        uses: actions/checkout@v4
+        with:
+          repository: utkarshdalal/GameNative
+          ref: 8ea964fcfeddf37920305f14a49f98d1a0d45127
+          path: source
+          fetch-depth: 1
 
       - name: Add swap
         run: |
-          sudo fallocate -l 8G /mnt/swapfile.ci
-          sudo chmod 600 /mnt/swapfile.ci
-          sudo mkswap /mnt/swapfile.ci
-          sudo swapon /mnt/swapfile.ci
+          sudo fallocate -l 8G /mnt/swapfile.usbfix
+          sudo chmod 600 /mnt/swapfile.usbfix
+          sudo mkswap /mnt/swapfile.usbfix
+          sudo swapon /mnt/swapfile.usbfix
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -36,7 +41,8 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Create local.properties
+      - name: Prepare build config
+        working-directory: source
         run: |
           cat > local.properties <<'EOF'
           POSTHOG_API_KEY=dummy
@@ -45,54 +51,190 @@ jobs:
           CLOUD_PROJECT_NUMBER=dummy
           EOF
 
-      - name: Apply Samsung USB OTG fix
-        run: python3 .github/scripts/patch_usb_fix.py
+      - name: Apply Samsung USB OTG patch
+        working-directory: source
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
 
-      - name: Build Legacy Debug Bundle
+          storage = Path('app/src/main/java/app/gamenative/utils/StorageUtils.kt')
+          s = storage.read_text(encoding='utf-8')
+
+          old = '''    fun isExternalInstallTarget(storageManager: StorageManager?, appFilesDir: File): Boolean {
+        val volume = storageManager?.getStorageVolume(appFilesDir)
+            ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)
+        if (!volume.isPrimary) return true
+'''
+          new = '''    fun isMountedInstallCandidate(storageManager: StorageManager?, appFilesDir: File): Boolean {
+        if (runCatching { Environment.getExternalStorageState(appFilesDir) == Environment.MEDIA_MOUNTED }.getOrDefault(false)) return true
+        val path = appFilesDir.absolutePath
+        return runCatching {
+            storageManager?.storageVolumes?.any { volume ->
+                val uuid = volume.uuid
+                volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
+                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
+            } == true
+        }.getOrDefault(false)
+    }
+
+    fun isExternalInstallTarget(storageManager: StorageManager?, appFilesDir: File): Boolean {
+        val path = appFilesDir.absolutePath
+        val matched = runCatching {
+            storageManager?.storageVolumes?.firstOrNull { volume ->
+                val uuid = volume.uuid
+                volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
+                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
+            }
+        }.getOrNull()
+        if (matched != null && !matched.isPrimary) return true
+
+        val volume = runCatching { storageManager?.getStorageVolume(appFilesDir) }.getOrNull()
+            ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)
+        if (!volume.isPrimary) return true
+'''
+          if old not in s:
+              raise SystemExit('StorageUtils target 1 not found')
+          s = s.replace(old, new, 1)
+
+          old = '''                    val volumeDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        volume.directory
+                    } else {
+                        // Use reflection for older APIs (26-29) if getExternalFilesDirs missed it
+                        try {
+                            val getPath = volume.javaClass.getMethod("getPath")
+                            (getPath.invoke(volume) as? String)?.let { File(it) }
+                        } catch (re: Exception) {
+                            null
+                        }
+                    } ?: continue
+
+                    // The app-specific dedicated directory is /Android/data/<package_name>/files
+                    val appFilesDir = File(volumeDir, "Android/data/${context.packageName}/files")
+                    if (!result.contains(appFilesDir) && (appFilesDir.exists() || appFilesDir.mkdirs())) {
+                        result.add(appFilesDir)
+                    }
+'''
+          new = '''                    val roots = mutableListOf<File>()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        volume.directory?.let { roots.add(it) }
+                    } else {
+                        try {
+                            val getPath = volume.javaClass.getMethod("getPath")
+                            (getPath.invoke(volume) as? String)?.let { roots.add(File(it)) }
+                        } catch (_: Exception) { }
+                    }
+                    val uuid = volume.uuid
+                    if (!uuid.isNullOrBlank()) {
+                        roots.add(File("/storage/$uuid"))
+                        roots.add(File("/mnt/media_rw/$uuid"))
+                    }
+                    for (root in roots.distinctBy { it.absolutePath }) {
+                        val appFilesDir = File(root, "Android/data/${context.packageName}/files")
+                        if (!result.contains(appFilesDir)) result.add(appFilesDir)
+                    }
+'''
+          if old not in s:
+              raise SystemExit('StorageUtils target 2 not found')
+          storage.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          for rel in [
+              'app/src/main/java/app/gamenative/service/DownloadService.kt',
+              'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt',
+          ]:
+              p = Path(rel)
+              t = p.read_text(encoding='utf-8')
+              oldf = '.filter { Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }\n            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'
+              newf = '.filter { StorageUtils.isMountedInstallCandidate(sm, it) }\n            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'
+              if oldf not in t:
+                  raise SystemExit(f'filter target not found: {rel}')
+              p.write_text(t.replace(oldf, newf, 1), encoding='utf-8')
+
+          settings = Path('app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt')
+          t = settings.read_text(encoding='utf-8')
+          t = t.replace(
+              'sm?.getStorageVolume(dir)?.getDescription(ctx) ?: externalStorageFallbackLabel',
+              'runCatching { sm?.getStorageVolume(dir)?.getDescription(ctx) }.getOrNull() ?: externalStorageFallbackLabel',
+              1,
+          )
+          settings.write_text(t, encoding='utf-8')
+
+          gradle = Path('app/build.gradle.kts')
+          t = gradle.read_text(encoding='utf-8')
+          oldg = '''        debug {
+            isDebuggable = true'''
+          newg = '''        debug {
+            applicationIdSuffix = ".usbfixfresh"
+            versionNameSuffix = "-usbfixfresh"
+            isDebuggable = true'''
+          if oldg not in t:
+              raise SystemExit('build.gradle debug target not found')
+          gradle.write_text(t.replace(oldg, newg, 1), encoding='utf-8')
+
+          strings = Path('app/src/main/res/values/strings.xml')
+          t = strings.read_text(encoding='utf-8')
+          t, n = re.subn(r'(<string\s+name="app_name"[^>]*>).*?(</string>)', r'\1GameNative USB Fix Fresh\2', t, count=1)
+          if n != 1:
+              raise SystemExit('app_name target not found')
+          strings.write_text(t, encoding='utf-8')
+
+          print('Fresh USB OTG patch applied')
+          PY
+
+      - name: Build directly installable signed debug APK
+        working-directory: source
         run: |
           chmod +x gradlew
-          ./gradlew -Pkotlin.daemon.jvmargs=-Xmx3g :app:bundleLegacyDebug --no-daemon
+          ./gradlew -Pkotlin.daemon.jvmargs=-Xmx3g :app:assembleLegacyDebug --no-daemon
+          cp app/build/outputs/apk/legacy/debug/app-legacy-debug.apk GameNative-USB-Fix-Fresh.apk
 
-      - name: Create signing key
+      - name: Verify APK signature and integrity
+        working-directory: source
         run: |
-          keytool -genkeypair -v \
-            -keystore usbfix.keystore \
-            -storepass changeit \
-            -keypass changeit \
-            -alias usbfix \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=GameNative USB Fix, OU=Local Build, O=Local, L=Seoul, S=Seoul, C=KR"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
+          "$APKSIGNER" verify --verbose --print-certs GameNative-USB-Fix-Fresh.apk
+          unzip -t GameNative-USB-Fix-Fresh.apk >/dev/null
+          sha256sum GameNative-USB-Fix-Fresh.apk | tee GameNative-USB-Fix-Fresh.sha256
 
-      - name: Build signed universal APK
+      - name: Split for delivery
+        working-directory: source
         run: |
-          java -jar tools/bundletool-all-1.17.2.jar build-apks \
-            --bundle=app/build/outputs/bundle/legacyDebug/app-legacy-debug.aab \
-            --output=GameNative-USB-Fix.apks \
-            --mode=universal \
-            --ks=usbfix.keystore \
-            --ks-pass=pass:changeit \
-            --ks-key-alias=usbfix \
-            --key-pass=pass:changeit
-          unzip -p GameNative-USB-Fix.apks universal.apk > GameNative-USB-Fix.apk
+          split -b 170M -d -a 2 GameNative-USB-Fix-Fresh.apk GameNative-USB-Fix-Fresh.apk.part-
+          ls -lh GameNative-USB-Fix-Fresh.apk*
 
-      - name: Verify APK signature block
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('GameNative-USB-Fix.apk').read_bytes()
-          if b'APK Sig Block 42' not in p:
-              raise SystemExit('APK signing block not found')
-          print('APK signing block verified')
-          PY
-          sha256sum GameNative-USB-Fix.apk > GameNative-USB-Fix.sha256
-
-      - name: Upload USB Fix APK
+      - name: Upload full APK
         uses: actions/upload-artifact@v4
         with:
-          name: GameNative-USB-Fix-SIGNED
+          name: GameNative-USB-Fix-Fresh-SIGNED
           path: |
-            GameNative-USB-Fix.apk
-            GameNative-USB-Fix.sha256
-          retention-days: 7
+            source/GameNative-USB-Fix-Fresh.apk
+            source/GameNative-USB-Fix-Fresh.sha256
+          retention-days: 14
+
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-part-00
+          path: source/GameNative-USB-Fix-Fresh.apk.part-00
+          retention-days: 14
+
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-part-01
+          path: source/GameNative-USB-Fix-Fresh.apk.part-01
+          retention-days: 14
+
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-part-02
+          path: source/GameNative-USB-Fix-Fresh.apk.part-02
+          retention-days: 14
+
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-part-03
+          path: source/GameNative-USB-Fix-Fresh.apk.part-03
+          retention-days: 14
