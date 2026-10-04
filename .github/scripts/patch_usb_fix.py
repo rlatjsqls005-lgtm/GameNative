@@ -1,93 +1,133 @@
 from pathlib import Path
 import re
+import sys
 
-storage = Path("app/src/main/java/app/gamenative/utils/StorageUtils.kt")
-s = storage.read_text(encoding="utf-8")
+root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('.')
+
+def read(rel):
+    return (root / rel).read_text(encoding='utf-8')
+
+def write(rel, text):
+    (root / rel).write_text(text, encoding='utf-8')
+
+storage_rel = 'app/src/main/java/app/gamenative/utils/StorageUtils.kt'
+s = read(storage_rel)
 
 old = '''    fun isExternalInstallTarget(storageManager: StorageManager?, appFilesDir: File): Boolean {
         val volume = storageManager?.getStorageVolume(appFilesDir)
-            ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)'''
-new = '''    fun isExternalInstallTarget(storageManager: StorageManager?, appFilesDir: File): Boolean {
-        // Samsung USB OTG can be mounted only under /mnt/media_rw/<UUID>, with no
-        // /storage/<UUID> view. Treat that public removable mount as an install target.
-        if (appFilesDir.absolutePath.startsWith("/mnt/media_rw/")) return true
+            ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)
+        if (!volume.isPrimary) return true
+'''
+new = '''    fun isMountedInstallCandidate(storageManager: StorageManager?, appFilesDir: File): Boolean {
+        if (runCatching { Environment.getExternalStorageState(appFilesDir) == Environment.MEDIA_MOUNTED }.getOrDefault(false)) return true
+        val path = appFilesDir.absolutePath
+        return runCatching {
+            storageManager?.storageVolumes?.any { volume ->
+                val uuid = volume.uuid
+                volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
+                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
+            } == true
+        }.getOrDefault(false)
+    }
 
-        val volume = storageManager?.getStorageVolume(appFilesDir)
-            ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)'''
+    fun isExternalInstallTarget(storageManager: StorageManager?, appFilesDir: File): Boolean {
+        val path = appFilesDir.absolutePath
+        val matched = runCatching {
+            storageManager?.storageVolumes?.firstOrNull { volume ->
+                val uuid = volume.uuid
+                volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
+                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
+            }
+        }.getOrNull()
+        if (matched != null && !matched.isPrimary) return true
+
+        val volume = runCatching { storageManager?.getStorageVolume(appFilesDir) }.getOrNull()
+            ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)
+        if (!volume.isPrimary) return true
+'''
 if old not in s:
-    raise SystemExit("StorageUtils isExternalInstallTarget patch target not found")
+    raise SystemExit('StorageUtils target 1 not found')
 s = s.replace(old, new, 1)
 
-old = '''                for (volume in sm.storageVolumes) {
-                    if (volume.state != Environment.MEDIA_MOUNTED) continue
-
-                    val volumeDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {'''
-new = '''                for (volume in sm.storageVolumes) {
-                    if (volume.state != Environment.MEDIA_MOUNTED) continue
-
-                    // Some Samsung builds expose USB OTG only at /mnt/media_rw/<UUID>.
-                    val volumeUuid = volume.uuid
-                    if (!volumeUuid.isNullOrBlank()) {
-                        val mediaRwRoot = File("/mnt/media_rw/$volumeUuid")
-                        if (mediaRwRoot.exists()) {
-                            result.add(File(mediaRwRoot, "Android/data/${context.packageName}/files"))
+old = '''                    val volumeDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        volume.directory
+                    } else {
+                        // Use reflection for older APIs (26-29) if getExternalFilesDirs missed it
+                        try {
+                            val getPath = volume.javaClass.getMethod("getPath")
+                            (getPath.invoke(volume) as? String)?.let { File(it) }
+                        } catch (re: Exception) {
+                            null
                         }
+                    } ?: continue
+
+                    // The app-specific dedicated directory is /Android/data/<package_name>/files
+                    val appFilesDir = File(volumeDir, "Android/data/${context.packageName}/files")
+                    if (!result.contains(appFilesDir) && (appFilesDir.exists() || appFilesDir.mkdirs())) {
+                        result.add(appFilesDir)
                     }
-
-                    val volumeDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {'''
+'''
+new = '''                    val roots = mutableListOf<File>()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        volume.directory?.let { roots.add(it) }
+                    } else {
+                        try {
+                            val getPath = volume.javaClass.getMethod("getPath")
+                            (getPath.invoke(volume) as? String)?.let { roots.add(File(it)) }
+                        } catch (_: Exception) { }
+                    }
+                    val uuid = volume.uuid
+                    if (!uuid.isNullOrBlank()) {
+                        roots.add(File("/storage/$uuid"))
+                        roots.add(File("/mnt/media_rw/$uuid"))
+                    }
+                    for (volumeRoot in roots.distinctBy { it.absolutePath }) {
+                        val appFilesDir = File(volumeRoot, "Android/data/${context.packageName}/files")
+                        if (!result.contains(appFilesDir)) result.add(appFilesDir)
+                    }
+'''
 if old not in s:
-    raise SystemExit("StorageUtils storageVolumes patch target not found")
+    raise SystemExit('StorageUtils target 2 not found')
 s = s.replace(old, new, 1)
-storage.write_text(s, encoding="utf-8")
+write(storage_rel, s)
 
-pattern = re.compile(
-    r'(?P<i>\s*)\.filter \{ Environment\.getExternalStorageState\(it\) == Environment\.MEDIA_MOUNTED \}\n'
-    r'(?P=i)\.filter \{ StorageUtils\.isExternalInstallTarget\(sm, it\) \}'
-)
-for path in [
-    "app/src/main/java/app/gamenative/service/DownloadService.kt",
-    "app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt",
+for rel in [
+    'app/src/main/java/app/gamenative/service/DownloadService.kt',
+    'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt',
 ]:
-    p = Path(path)
-    s = p.read_text(encoding="utf-8")
-    match = pattern.search(s)
-    if not match:
-        raise SystemExit(f"External storage filter patch target not found in {path}")
-    i = match.group("i")
-    replacement = (
-        f'{i}.filter {{\n'
-        f'{i}    it.absolutePath.startsWith("/mnt/media_rw/") ||\n'
-        f'{i}        runCatching {{ Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }}.getOrDefault(false)\n'
-        f'{i}}}\n'
-        f'{i}.filter {{\n'
-        f'{i}    it.absolutePath.startsWith("/mnt/media_rw/") ||\n'
-        f'{i}        StorageUtils.isExternalInstallTarget(sm, it)\n'
-        f'{i}}}'
-    )
-    p.write_text(pattern.sub(replacement, s, count=1), encoding="utf-8")
+    t = read(rel)
+    old_filter = '.filter { Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }\n            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'
+    new_filter = '.filter { StorageUtils.isMountedInstallCandidate(sm, it) }\n            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'
+    if old_filter not in t:
+        raise SystemExit(f'filter target not found in {rel}')
+    write(rel, t.replace(old_filter, new_filter, 1))
 
-gradle = Path("app/build.gradle.kts")
-s = gradle.read_text(encoding="utf-8")
+settings_rel = 'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt'
+t = read(settings_rel)
+t = t.replace(
+    'sm?.getStorageVolume(dir)?.getDescription(ctx) ?: externalStorageFallbackLabel',
+    'runCatching { sm?.getStorageVolume(dir)?.getDescription(ctx) }.getOrNull() ?: externalStorageFallbackLabel',
+    1,
+)
+write(settings_rel, t)
+
+gradle_rel = 'app/build.gradle.kts'
+t = read(gradle_rel)
 old = '''        debug {
             isDebuggable = true'''
 new = '''        debug {
-            applicationIdSuffix = ".usbfix"
-            versionNameSuffix = "-usbfix"
+            applicationIdSuffix = ".usbfixfresh"
+            versionNameSuffix = "-usbfixfresh"
             isDebuggable = true'''
-if old not in s:
-    raise SystemExit("Debug build type patch target not found")
-gradle.write_text(s.replace(old, new, 1), encoding="utf-8")
+if old not in t:
+    raise SystemExit('build.gradle debug target not found')
+write(gradle_rel, t.replace(old, new, 1))
 
-strings = Path("app/src/main/res/values/strings.xml")
-if strings.exists():
-    s = strings.read_text(encoding="utf-8")
-    s2, count = re.subn(
-        r'(<string\s+name="app_name"[^>]*>).*?(</string>)',
-        r'\1GameNative USB Fix\2',
-        s,
-        count=1,
-    )
-    if count:
-        strings.write_text(s2, encoding="utf-8")
+strings_rel = 'app/src/main/res/values/strings.xml'
+t = read(strings_rel)
+t, n = re.subn(r'(<string\s+name="app_name"[^>]*>).*?(</string>)', r'\1GameNative USB Fix Fresh\2', t, count=1)
+if n != 1:
+    raise SystemExit('app_name target not found')
+write(strings_rel, t)
 
-print("Samsung USB OTG patch applied")
+print('Fresh USB OTG patch applied')
