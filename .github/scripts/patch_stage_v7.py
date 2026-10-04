@@ -220,21 +220,21 @@ if cleanup_anchor not in t:
 t = t.replace(cleanup_anchor, cleanup, 1)
 write(steam_rel, t)
 
-# Re-label the already-patched V6 debug build as V7.
+# V8 is the USB base patch. Re-label the staging build as a separate V9 install.
 gradle_rel = 'app/build.gradle.kts'
 t = read(gradle_rel)
-if '.usbfixv6' not in t or '-usbfixv6' not in t:
-    raise SystemExit('V6 application id/version suffix not found')
-t = t.replace('.usbfixv6', '.usbfixv7', 1)
-t = t.replace('-usbfixv6', '-usbfixv7', 1)
+if '.usbfixv8' not in t or '-usbfixv8' not in t:
+    raise SystemExit('V8 application id/version suffix not found')
+t = t.replace('.usbfixv8', '.usbfixv9', 1)
+t = t.replace('-usbfixv8', '-usbfixv9', 1)
 write(gradle_rel, t)
 
 strings_rel = 'app/src/main/res/values/strings.xml'
 t = read(strings_rel)
-old_name = '<string name="app_name">GameNative USB V6</string>'
-new_name = '<string name="app_name">GameNative USB V7</string>'
+old_name = '<string name="app_name">GameNative USB V8</string>'
+new_name = '<string name="app_name">GameNative USB V9</string>'
 if old_name not in t:
-    raise SystemExit('V6 app_name not found')
+    raise SystemExit('V8 app_name not found')
 write(strings_rel, t.replace(old_name, new_name, 1))
 
-print('USB V7 staging patch applied: per-depot internal download -> Java stream flush to external')
+print('USB V9 staging patch applied: per-depot internal download -> Java stream flush to external')
