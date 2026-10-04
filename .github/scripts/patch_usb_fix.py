@@ -260,14 +260,187 @@ if old_pwrite not in t:
     raise SystemExit('Steam pwrite target not found')
 write(rust_rel, t.replace(old_pwrite, new_pwrite, 1))
 
-# V6 is separate from previous test APKs.
+# Android shared/exFAT storage is already case-insensitive. Re-scanning every path
+# component through FUSE before the first byte creates an O(files x directory entries)
+# startup stall. Keep the resolver for desktop tests/ports, bypass it on Android.
+mod_rel = 'app/src/main/cpp/gn-download/rust/src/store_dl/mod.rs'
+t = read(mod_rel)
+old_resolve = '''pub(crate) fn resolve_existing_case(base: &str, rel: &str) -> String {
+    let mut current = std::path::PathBuf::from(base);
+'''
+new_resolve = '''pub(crate) fn resolve_existing_case(base: &str, rel: &str) -> String {
+    #[cfg(target_os = "android")]
+    {
+        let _ = base;
+        return rel.replace('\\\\', "/");
+    }
+
+    let mut current = std::path::PathBuf::from(base);
+'''
+if old_resolve not in t:
+    raise SystemExit('Android case resolver target not found')
+write(mod_rel, t.replace(old_resolve, new_resolve, 1))
+
+# A fresh Android target contains only .DepotDownloader metadata. Avoid thousands of
+# negative metadata lookups on the USB FUSE/exFAT mount before the first chunk arrives.
+t = read(rust_rel)
+old_prepare = '''    fn prepare(manifest: &ContentManifest, target_dir: &str) -> Self {
+        let mut slots = Vec::with_capacity(manifest.files.len());
+        let mut already_present = 0u64;
+        for file in &manifest.files {
+'''
+new_prepare = '''    fn prepare(manifest: &ContentManifest, target_dir: &str) -> Self {
+        let fresh_android_target = cfg!(target_os = "android")
+            && fs::read_dir(target_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .all(|entry| entry.file_name().to_string_lossy() == ".DepotDownloader")
+                })
+                .unwrap_or(true);
+        let mut slots = Vec::with_capacity(manifest.files.len());
+        let mut already_present = 0u64;
+        for file in &manifest.files {
+'''
+if old_prepare not in t:
+    raise SystemExit('DepotFiles prepare target not found')
+t = t.replace(old_prepare, new_prepare, 1)
+old_existing = '''            let preexisting = if is_regular {
+                fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+'''
+new_existing = '''            let preexisting = if is_regular && !fresh_android_target {
+                fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+'''
+if old_existing not in t:
+    raise SystemExit('preexisting metadata target not found')
+t = t.replace(old_existing, new_existing, 1)
+
+# Explicit fsync is unnecessary for recoverable download state and can wedge on Android's
+# USB exFAT/FUSE stack. On Android, close the file normally; desktop keeps durability.
+old_sync1 = '''            handle
+                .sync_all()
+                .map_err(|err| format!("write_depot: final sync '{}': {err}", slot.path))?;
+'''
+new_sync1 = '''            sync_install_file(handle)
+                .map_err(|err| format!("write_depot: final sync '{}': {err}", slot.path))?;
+'''
+if old_sync1 not in t:
+    raise SystemExit('complete_chunk sync target not found')
+t = t.replace(old_sync1, new_sync1, 1)
+
+old_sync2 = '''                handle
+                    .sync_all()
+                    .map_err(|err| format!("write_depot: final sync '{}': {err}", slot.path))?;
+'''
+new_sync2 = '''                sync_install_file(&handle)
+                    .map_err(|err| format!("write_depot: final sync '{}': {err}", slot.path))?;
+'''
+if old_sync2 not in t:
+    raise SystemExit('finalize handle sync target not found')
+t = t.replace(old_sync2, new_sync2, 1)
+
+old_sync3 = '''                file.sync_all()
+                    .map_err(|err| format!("write_depot: final sync '{}': {err}", slot.path))?;
+'''
+new_sync3 = '''                sync_install_file(&file)
+                    .map_err(|err| format!("write_depot: final sync '{}': {err}", slot.path))?;
+'''
+if old_sync3 not in t:
+    raise SystemExit('zero-chunk sync target not found')
+t = t.replace(old_sync3, new_sync3, 1)
+
+insert_before = '''pub fn sync_file(path: impl AsRef<Path>) -> bool {
+'''
+sync_helper = '''fn sync_install_file(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = file;
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        file.sync_all()
+    }
+}
+
+pub fn sync_file(path: impl AsRef<Path>) -> bool {
+'''
+if insert_before not in t:
+    raise SystemExit('sync helper insertion target not found')
+t = t.replace(insert_before, sync_helper, 1)
+t = t.replace(
+'''    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .is_ok()
+''',
+'''    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .and_then(|file| sync_install_file(&file))
+        .is_ok()
+''',
+1)
+t = t.replace(
+'''    file.sync_all()
+        .map_err(|err| format!("write_depot: final sync '{}': {err}", path.display()))
+''',
+'''    sync_install_file(&file)
+        .map_err(|err| format!("write_depot: final sync '{}': {err}", path.display()))
+''',
+1)
+write(rust_rel, t)
+
+config_rel = 'app/src/main/cpp/gn-download/rust/src/store_dl/steam/depot_config.rs'
+t = read(config_rel)
+old_config_sync = '''    if file.write_all(bytes).is_err() || file.sync_all().is_err() {
+        let _ = fs::remove_file(final_path);
+        return false;
+    }
+    drop(file);
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    true
+'''
+new_config_sync = '''    if file.write_all(bytes).is_err() {
+        let _ = fs::remove_file(final_path);
+        return false;
+    }
+    #[cfg(not(target_os = "android"))]
+    if file.sync_all().is_err() {
+        let _ = fs::remove_file(final_path);
+        return false;
+    }
+    drop(file);
+    #[cfg(not(target_os = "android"))]
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    true
+'''
+if old_config_sync not in t:
+    raise SystemExit('depot config sync target not found')
+write(config_rel, t.replace(old_config_sync, new_config_sync, 1))
+
+
+# V7 is separate from previous test APKs.
 gradle_rel = 'app/build.gradle.kts'
 t = read(gradle_rel)
 old = '''        debug {
             isDebuggable = true'''
 new = '''        debug {
-            applicationIdSuffix = ".usbfixv6"
-            versionNameSuffix = "-usbfixv6"
+            applicationIdSuffix = ".usbfixv7"
+            versionNameSuffix = "-usbfixv7"
             isDebuggable = true'''
 if old not in t:
     raise SystemExit('build.gradle debug target not found')
@@ -276,9 +449,9 @@ write(gradle_rel, t.replace(old, new, 1))
 strings_rel = 'app/src/main/res/values/strings.xml'
 t = read(strings_rel)
 old_name = '<string name="app_name">GameNative</string>'
-new_name = '<string name="app_name">GameNative USB V6</string>'
+new_name = '<string name="app_name">GameNative USB V7</string>'
 if old_name not in t:
     raise SystemExit('app_name target not found')
 write(strings_rel, t.replace(old_name, new_name, 1))
 
-print('USB V6 patch applied: Samsung OTG + permission flow + exFAT/FUSE Steam writer fallback')
+print('USB V7 patch applied: Samsung OTG + permission flow + exFAT/FUSE startup + writer fallback')
