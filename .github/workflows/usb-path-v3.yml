@@ -1,0 +1,23 @@
+name: Build USB Path V3 Fix
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - '.github/workflows/usb-path-v3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout clean upstream source
+        uses: actions/checkout@v4
+        with:
+          repository: utkarshdalal/GameNative
+          ref: 8ea964fcfeddf37920305
