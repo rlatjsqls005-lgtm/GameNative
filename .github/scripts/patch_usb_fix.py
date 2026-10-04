@@ -25,7 +25,7 @@ new = '''    fun isMountedInstallCandidate(storageManager: StorageManager?, appF
             storageManager?.storageVolumes?.any { volume ->
                 val uuid = volume.uuid
                 volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
-                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
+                    path.startsWith("/storage/$uuid/")
             } == true
         }.getOrDefault(false)
     }
@@ -36,7 +36,7 @@ new = '''    fun isMountedInstallCandidate(storageManager: StorageManager?, appF
             storageManager?.storageVolumes?.firstOrNull { volume ->
                 val uuid = volume.uuid
                 volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
-                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
+                    path.startsWith("/storage/$uuid/")
             }
         }.getOrNull()
         if (matched != null && !matched.isPrimary) return true
@@ -49,8 +49,6 @@ if old not in s:
     raise SystemExit('StorageUtils target 1 not found')
 s = s.replace(old, new, 1)
 
-# The original function can smart-cast storageManager after the safe-call/elvis expression.
-# The patched runCatching form cannot, so keep the legacy API call nullable-safe.
 s = s.replace(
     '                storageManager.getUuidForPath(appFilesDir)',
     '                storageManager?.getUuidForPath(appFilesDir)',
@@ -85,23 +83,48 @@ new = '''                    val roots = mutableListOf<File>()
                         } catch (_: Exception) { }
                     }
                     val uuid = volume.uuid
-                    if (!uuid.isNullOrBlank()) {
-                        roots.add(File("/storage/$uuid"))
-                        roots.add(File("/mnt/media_rw/$uuid"))
-                    }
+                    if (!uuid.isNullOrBlank()) roots.add(File("/storage/$uuid"))
                     for (volumeRoot in roots.distinctBy { it.absolutePath }) {
                         val appFilesDir = File(volumeRoot, "Android/data/${context.packageName}/files")
-                        if (!result.contains(appFilesDir)) result.add(appFilesDir)
+                        if (!result.contains(appFilesDir) && (appFilesDir.exists() || appFilesDir.mkdirs())) {
+                            result.add(appFilesDir)
+                        }
                     }
 '''
 if old not in s:
     raise SystemExit('StorageUtils target 2 not found')
 s = s.replace(old, new, 1)
+
+old = '''    fun ensureInstallRoot(dir: File): Boolean {
+        if (!dir.isDirectory && !dir.mkdirs()) return false
+        runCatching { File(dir, ".nomedia").createNewFile() }
+        return true
+    }
+'''
+new = '''    fun ensureInstallRoot(dir: File): Boolean {
+        if (!dir.isDirectory && !dir.mkdirs()) return false
+        val probe = File(dir, ".gn_write_probe_${System.nanoTime()}")
+        val writable = runCatching {
+            probe.writeText("ok")
+            probe.delete()
+            true
+        }.getOrDefault(false)
+        if (!writable) {
+            runCatching { probe.delete() }
+            return false
+        }
+        runCatching { File(dir, ".nomedia").createNewFile() }
+        return true
+    }
+'''
+if old not in s:
+    raise SystemExit('ensureInstallRoot target not found')
+s = s.replace(old, new, 1)
 write(storage_rel, s)
 
 filter_pattern = re.compile(
-    r'(?P<indent>[ \t]*)\.filter \{ Environment\.getExternalStorageState\(it\) == Environment\.MEDIA_MOUNTED \}\r?\n'
-    r'(?P=indent)\.filter \{ StorageUtils\.isExternalInstallTarget\(sm, it\) \}'
+    r'(?P<indent>[ \\t]*)\\.filter \\{ Environment\\.getExternalStorageState\\(it\\) == Environment\\.MEDIA_MOUNTED \\}\\r?\\n'
+    r'(?P=indent)\\.filter \\{ StorageUtils\\.isExternalInstallTarget\\(sm, it\\) \\}'
 )
 for rel in [
     'app/src/main/java/app/gamenative/service/DownloadService.kt',
@@ -113,7 +136,7 @@ for rel in [
         raise SystemExit(f'filter target not found in {rel}')
     indent = m.group('indent')
     repl = (
-        f'{indent}.filter {{ StorageUtils.isMountedInstallCandidate(sm, it) }}\n'
+        f'{indent}.filter {{ StorageUtils.isMountedInstallCandidate(sm, it) }}\\n'
         f'{indent}.filter {{ StorageUtils.isExternalInstallTarget(sm, it) }}'
     )
     write(rel, filter_pattern.sub(repl, t, count=1))
@@ -132,8 +155,8 @@ t = read(gradle_rel)
 old = '''        debug {
             isDebuggable = true'''
 new = '''        debug {
-            applicationIdSuffix = ".usbfixfresh"
-            versionNameSuffix = "-usbfixfresh"
+            applicationIdSuffix = ".usbfixv3"
+            versionNameSuffix = "-usbfixv3"
             isDebuggable = true'''
 if old not in t:
     raise SystemExit('build.gradle debug target not found')
@@ -141,9 +164,9 @@ write(gradle_rel, t.replace(old, new, 1))
 
 strings_rel = 'app/src/main/res/values/strings.xml'
 t = read(strings_rel)
-t, n = re.subn(r'(<string\s+name="app_name"[^>]*>).*?(</string>)', r'\1GameNative USB Fix Fresh\2', t, count=1)
+t, n = re.subn(r'(<string\\s+name="app_name"[^>]*>).*?(</string>)', r'\\1GameNative USB V3\\2', t, count=1)
 if n != 1:
     raise SystemExit('app_name target not found')
 write(strings_rel, t)
 
-print('Fresh USB OTG patch applied')
+print('USB V3 patch applied: app-facing writable path only')
