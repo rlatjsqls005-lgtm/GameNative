@@ -1,15 +1,6 @@
 from pathlib import Path
 import re
 
-
-def replace_once(path: str, old: str, new: str, label: str) -> None:
-    p = Path(path)
-    s = p.read_text(encoding="utf-8")
-    if old not in s:
-        raise SystemExit(f"{label}: patch target not found in {path}")
-    p.write_text(s.replace(old, new, 1), encoding="utf-8")
-
-
 storage = Path("app/src/main/java/app/gamenative/utils/StorageUtils.kt")
 s = storage.read_text(encoding="utf-8")
 
@@ -35,8 +26,6 @@ new = '''                for (volume in sm.storageVolumes) {
                     if (volume.state != Environment.MEDIA_MOUNTED) continue
 
                     // Some Samsung builds expose USB OTG only at /mnt/media_rw/<UUID>.
-                    // Synthesize an app-files-shaped path from that root; callers map it
-                    // to the public <volume>/GameNative install root.
                     val volumeUuid = volume.uuid
                     if (!volumeUuid.isNullOrBlank()) {
                         val mediaRwRoot = File("/mnt/media_rw/$volumeUuid")
@@ -51,29 +40,32 @@ if old not in s:
 s = s.replace(old, new, 1)
 storage.write_text(s, encoding="utf-8")
 
-# Android's Environment state API may reject /mnt/media_rw paths even though the
-# StorageManager volume is mounted. Accept those synthesized Samsung USB paths directly.
+pattern = re.compile(
+    r'(?P<i>\s*)\.filter \{ Environment\.getExternalStorageState\(it\) == Environment\.MEDIA_MOUNTED \}\n'
+    r'(?P=i)\.filter \{ StorageUtils\.isExternalInstallTarget\(sm, it\) \}'
+)
 for path in [
     "app/src/main/java/app/gamenative/service/DownloadService.kt",
     "app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt",
 ]:
     p = Path(path)
     s = p.read_text(encoding="utf-8")
-    old = '''.filter { Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }
-            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'''
-    new = '''.filter {
-                it.absolutePath.startsWith("/mnt/media_rw/") ||
-                    runCatching { Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }.getOrDefault(false)
-            }
-            .filter {
-                it.absolutePath.startsWith("/mnt/media_rw/") ||
-                    StorageUtils.isExternalInstallTarget(sm, it)
-            }'''
-    if old not in s:
+    match = pattern.search(s)
+    if not match:
         raise SystemExit(f"External storage filter patch target not found in {path}")
-    p.write_text(s.replace(old, new, 1), encoding="utf-8")
+    i = match.group("i")
+    replacement = (
+        f'{i}.filter {{\n'
+        f'{i}    it.absolutePath.startsWith("/mnt/media_rw/") ||\n'
+        f'{i}        runCatching {{ Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }}.getOrDefault(false)\n'
+        f'{i}}}\n'
+        f'{i}.filter {{\n'
+        f'{i}    it.absolutePath.startsWith("/mnt/media_rw/") ||\n'
+        f'{i}        StorageUtils.isExternalInstallTarget(sm, it)\n'
+        f'{i}}}'
+    )
+    p.write_text(pattern.sub(replacement, s, count=1), encoding="utf-8")
 
-# Install beside the official GameNative package so the user's existing app/data are untouched.
 gradle = Path("app/build.gradle.kts")
 s = gradle.read_text(encoding="utf-8")
 old = '''        debug {
