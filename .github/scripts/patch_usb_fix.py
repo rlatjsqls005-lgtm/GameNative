@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 import sys
 
 root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('.')
@@ -122,24 +121,18 @@ if old not in s:
 s = s.replace(old, new, 1)
 write(storage_rel, s)
 
-filter_pattern = re.compile(
-    r'(?P<indent>[ \\t]*)\\.filter \\{ Environment\\.getExternalStorageState\\(it\\) == Environment\\.MEDIA_MOUNTED \\}\\r?\\n'
-    r'(?P=indent)\\.filter \\{ StorageUtils\\.isExternalInstallTarget\\(sm, it\\) \\}'
-)
+old_filter = '''            .filter { Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }
+            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'''
+new_filter = '''            .filter { StorageUtils.isMountedInstallCandidate(sm, it) }
+            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'''
 for rel in [
     'app/src/main/java/app/gamenative/service/DownloadService.kt',
     'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt',
 ]:
     t = read(rel)
-    m = filter_pattern.search(t)
-    if not m:
+    if old_filter not in t:
         raise SystemExit(f'filter target not found in {rel}')
-    indent = m.group('indent')
-    repl = (
-        f'{indent}.filter {{ StorageUtils.isMountedInstallCandidate(sm, it) }}\\n'
-        f'{indent}.filter {{ StorageUtils.isExternalInstallTarget(sm, it) }}'
-    )
-    write(rel, filter_pattern.sub(repl, t, count=1))
+    write(rel, t.replace(old_filter, new_filter, 1))
 
 settings_rel = 'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt'
 t = read(settings_rel)
@@ -164,9 +157,10 @@ write(gradle_rel, t.replace(old, new, 1))
 
 strings_rel = 'app/src/main/res/values/strings.xml'
 t = read(strings_rel)
-t, n = re.subn(r'(<string\\s+name="app_name"[^>]*>).*?(</string>)', r'\\1GameNative USB V3\\2', t, count=1)
-if n != 1:
+old_name = '<string name="app_name">GameNative</string>'
+new_name = '<string name="app_name">GameNative USB V3</string>'
+if old_name not in t:
     raise SystemExit('app_name target not found')
-write(strings_rel, t)
+write(strings_rel, t.replace(old_name, new_name, 1))
 
 print('USB V3 patch applied: app-facing writable path only')
