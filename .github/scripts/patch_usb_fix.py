@@ -49,6 +49,14 @@ if old not in s:
     raise SystemExit('StorageUtils target 1 not found')
 s = s.replace(old, new, 1)
 
+# The original function can smart-cast storageManager after the safe-call/elvis expression.
+# The patched runCatching form cannot, so keep the legacy API call nullable-safe.
+s = s.replace(
+    '                storageManager.getUuidForPath(appFilesDir)',
+    '                storageManager?.getUuidForPath(appFilesDir)',
+    1,
+)
+
 old = '''                    val volumeDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         volume.directory
                     } else {
