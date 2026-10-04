@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sys
 
 root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('.')
@@ -121,18 +122,24 @@ if old not in s:
 s = s.replace(old, new, 1)
 write(storage_rel, s)
 
-old_filter = '''            .filter { Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }
-            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'''
-new_filter = '''            .filter { StorageUtils.isMountedInstallCandidate(sm, it) }
-            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'''
+filter_re = re.compile(
+    r'(?P<indent>[ \t]*)\.filter \{ Environment\.getExternalStorageState\(it\) == Environment\.MEDIA_MOUNTED \}\r?\n'
+    r'(?P=indent)\.filter \{ StorageUtils\.isExternalInstallTarget\(sm, it\) \}'
+)
 for rel in [
     'app/src/main/java/app/gamenative/service/DownloadService.kt',
     'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt',
 ]:
     t = read(rel)
-    if old_filter not in t:
+    m = filter_re.search(t)
+    if not m:
         raise SystemExit(f'filter target not found in {rel}')
-    write(rel, t.replace(old_filter, new_filter, 1))
+    indent = m.group('indent')
+    replacement = (
+        f'{indent}.filter {{ StorageUtils.isMountedInstallCandidate(sm, it) }}\n'
+        f'{indent}.filter {{ StorageUtils.isExternalInstallTarget(sm, it) }}'
+    )
+    write(rel, filter_re.sub(replacement, t, count=1))
 
 settings_rel = 'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt'
 t = read(settings_rel)
