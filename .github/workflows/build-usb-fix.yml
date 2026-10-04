@@ -53,14 +53,46 @@ jobs:
           chmod +x gradlew
           ./gradlew -Pkotlin.daemon.jvmargs=-Xmx3g :app:bundleLegacyDebug --no-daemon
 
-      - name: Build universal APK
+      - name: Create signing key
         run: |
-          java -jar tools/bundletool-all-1.17.2.jar build-apks --bundle=app/build/outputs/bundle/legacyDebug/app-legacy-debug.aab --output=GameNative-USB-Fix.apks --mode=universal
+          keytool -genkeypair -v \
+            -keystore usbfix.keystore \
+            -storepass changeit \
+            -keypass changeit \
+            -alias usbfix \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=GameNative USB Fix, OU=Local Build, O=Local, L=Seoul, S=Seoul, C=KR"
+
+      - name: Build signed universal APK
+        run: |
+          java -jar tools/bundletool-all-1.17.2.jar build-apks \
+            --bundle=app/build/outputs/bundle/legacyDebug/app-legacy-debug.aab \
+            --output=GameNative-USB-Fix.apks \
+            --mode=universal \
+            --ks=usbfix.keystore \
+            --ks-pass=pass:changeit \
+            --ks-key-alias=usbfix \
+            --key-pass=pass:changeit
           unzip -p GameNative-USB-Fix.apks universal.apk > GameNative-USB-Fix.apk
+
+      - name: Verify APK signature block
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('GameNative-USB-Fix.apk').read_bytes()
+          if b'APK Sig Block 42' not in p:
+              raise SystemExit('APK signing block not found')
+          print('APK signing block verified')
+          PY
+          sha256sum GameNative-USB-Fix.apk > GameNative-USB-Fix.sha256
 
       - name: Upload USB Fix APK
         uses: actions/upload-artifact@v4
         with:
-          name: GameNative-USB-Fix
-          path: GameNative-USB-Fix.apk
+          name: GameNative-USB-Fix-SIGNED
+          path: |
+            GameNative-USB-Fix.apk
+            GameNative-USB-Fix.sha256
           retention-days: 7
