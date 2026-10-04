@@ -1,4 +1,4 @@
-name: Build USB V7 Staging
+name: Build USB V9 Staging
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
       - '.github/workflows/usb-path-v3.yml'
       - '.github/scripts/patch_usb_fix.py'
       - '.github/scripts/patch_stage_v7.py'
+      - '.github/scripts/patch_stage_v9_finalize.py'
   workflow_dispatch:
 
 permissions:
@@ -34,10 +35,10 @@ jobs:
       - name: Free disk and add swap
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
-          sudo fallocate -l 8G /mnt/swapfile.usbv7
-          sudo chmod 600 /mnt/swapfile.usbv7
-          sudo mkswap /mnt/swapfile.usbv7
-          sudo swapon /mnt/swapfile.usbv7
+          sudo fallocate -l 8G /mnt/swapfile.usbv9
+          sudo chmod 600 /mnt/swapfile.usbv9
+          sudo mkswap /mnt/swapfile.usbv9
+          sudo swapon /mnt/swapfile.usbv9
           df -h /
 
       - name: Set up Java 17
@@ -60,65 +61,68 @@ jobs:
             'CLOUD_PROJECT_NUMBER=dummy' \
             > local.properties
 
-      - name: Apply USB V6 base patch
+      - name: Apply USB V8 base patch
         run: python3 fork/.github/scripts/patch_usb_fix.py source
 
-      - name: Apply USB V7 staging patch
+      - name: Apply USB V9 staging patch
         run: python3 fork/.github/scripts/patch_stage_v7.py source
+
+      - name: Finalize USB V9 staging metadata
+        run: python3 fork/.github/scripts/patch_stage_v9_finalize.py source
 
       - name: Build signed debug APK
         working-directory: source
         run: |
           chmod +x gradlew
           ./gradlew -Pkotlin.daemon.jvmargs=-Xmx3g :app:assembleLegacyDebug --no-daemon
-          cp app/build/outputs/apk/legacy/debug/app-legacy-debug.apk GameNative-USB-V7.apk
+          cp app/build/outputs/apk/legacy/debug/app-legacy-debug.apk GameNative-USB-V9.apk
 
       - name: Verify APK
         working-directory: source
         run: |
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
-          "$APKSIGNER" verify --verbose --print-certs GameNative-USB-V7.apk
-          unzip -t GameNative-USB-V7.apk >/dev/null
-          sha256sum GameNative-USB-V7.apk | tee GameNative-USB-V7.sha256
+          "$APKSIGNER" verify --verbose --print-certs GameNative-USB-V9.apk
+          unzip -t GameNative-USB-V9.apk >/dev/null
+          sha256sum GameNative-USB-V9.apk | tee GameNative-USB-V9.sha256
 
       - name: Split APK for delivery
         working-directory: source
         run: |
-          split -b 150M -d -a 2 GameNative-USB-V7.apk GameNative-USB-V7.apk.part-
-          ls -lh GameNative-USB-V7.apk*
+          split -b 150M -d -a 2 GameNative-USB-V9.apk GameNative-USB-V9.apk.part-
+          ls -lh GameNative-USB-V9.apk*
 
       - name: Upload checksum
         uses: actions/upload-artifact@v4
         with:
-          name: usb-v7-checksum
-          path: source/GameNative-USB-V7.sha256
+          name: usb-v9-checksum
+          path: source/GameNative-USB-V9.sha256
           retention-days: 14
 
       - name: Upload part 00
         uses: actions/upload-artifact@v4
         with:
-          name: usb-v7-part-00
-          path: source/GameNative-USB-V7.apk.part-00
+          name: usb-v9-part-00
+          path: source/GameNative-USB-V9.apk.part-00
           retention-days: 14
 
       - name: Upload part 01
         uses: actions/upload-artifact@v4
         with:
-          name: usb-v7-part-01
-          path: source/GameNative-USB-V7.apk.part-01
+          name: usb-v9-part-01
+          path: source/GameNative-USB-V9.apk.part-01
           retention-days: 14
 
       - name: Upload part 02
         uses: actions/upload-artifact@v4
         with:
-          name: usb-v7-part-02
-          path: source/GameNative-USB-V7.apk.part-02
+          name: usb-v9-part-02
+          path: source/GameNative-USB-V9.apk.part-02
           retention-days: 14
 
       - name: Upload part 03
         uses: actions/upload-artifact@v4
         with:
-          name: usb-v7-part-03
-          path: source/GameNative-USB-V7.apk.part-03
+          name: usb-v9-part-03
+          path: source/GameNative-USB-V9.apk.part-03
           if-no-files-found: ignore
           retention-days: 14
