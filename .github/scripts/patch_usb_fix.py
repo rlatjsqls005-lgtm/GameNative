@@ -91,16 +91,24 @@ if old not in s:
 s = s.replace(old, new, 1)
 write(storage_rel, s)
 
+filter_pattern = re.compile(
+    r'(?P<indent>[ \t]*)\.filter \{ Environment\.getExternalStorageState\(it\) == Environment\.MEDIA_MOUNTED \}\r?\n'
+    r'(?P=indent)\.filter \{ StorageUtils\.isExternalInstallTarget\(sm, it\) \}'
+)
 for rel in [
     'app/src/main/java/app/gamenative/service/DownloadService.kt',
     'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt',
 ]:
     t = read(rel)
-    old_filter = '.filter { Environment.getExternalStorageState(it) == Environment.MEDIA_MOUNTED }\n            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'
-    new_filter = '.filter { StorageUtils.isMountedInstallCandidate(sm, it) }\n            .filter { StorageUtils.isExternalInstallTarget(sm, it) }'
-    if old_filter not in t:
+    m = filter_pattern.search(t)
+    if not m:
         raise SystemExit(f'filter target not found in {rel}')
-    write(rel, t.replace(old_filter, new_filter, 1))
+    indent = m.group('indent')
+    repl = (
+        f'{indent}.filter {{ StorageUtils.isMountedInstallCandidate(sm, it) }}\n'
+        f'{indent}.filter {{ StorageUtils.isExternalInstallTarget(sm, it) }}'
+    )
+    write(rel, filter_pattern.sub(repl, t, count=1))
 
 settings_rel = 'app/src/main/java/app/gamenative/ui/screen/settings/SettingsGroupInterface.kt'
 t = read(settings_rel)
