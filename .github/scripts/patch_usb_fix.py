@@ -13,6 +13,9 @@ def write(rel, text):
 storage_rel = 'app/src/main/java/app/gamenative/utils/StorageUtils.kt'
 s = read(storage_rel)
 
+# Samsung OTG: allow both the normal /storage/<UUID> namespace and the vold
+# /mnt/media_rw/<UUID> namespace for detection. The latter is used only when
+# its app-specific Android/data/<pkg>/files directory is actually writable.
 old = '''    fun isExternalInstallTarget(storageManager: StorageManager?, appFilesDir: File): Boolean {
         val volume = storageManager?.getStorageVolume(appFilesDir)
             ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)
@@ -25,7 +28,7 @@ new = '''    fun isMountedInstallCandidate(storageManager: StorageManager?, appF
             storageManager?.storageVolumes?.any { volume ->
                 val uuid = volume.uuid
                 volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
-                    path.startsWith("/storage/$uuid/")
+                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
             } == true
         }.getOrDefault(false)
     }
@@ -36,7 +39,7 @@ new = '''    fun isMountedInstallCandidate(storageManager: StorageManager?, appF
             storageManager?.storageVolumes?.firstOrNull { volume ->
                 val uuid = volume.uuid
                 volume.state == Environment.MEDIA_MOUNTED && !uuid.isNullOrBlank() &&
-                    path.startsWith("/storage/$uuid/")
+                    (path.startsWith("/storage/$uuid/") || path.startsWith("/mnt/media_rw/$uuid/"))
             }
         }.getOrNull()
         if (matched != null && !matched.isPrimary) return true
@@ -54,6 +57,53 @@ s = s.replace(
     '                storageManager?.getUuidForPath(appFilesDir)',
     1,
 )
+
+# Do not map /mnt/media_rw app-private storage to /mnt/media_rw/<uuid>/GameNative.
+# That public root is what caused the native Steam downloader to stall after depot prep.
+old = '''    fun publicInstallRoot(appFilesDir: File): File? {
+        val path = appFilesDir.absolutePath
+        val idx = path.indexOf("/Android/data/")
+        if (idx <= 0) return null
+        return File(path.substring(0, idx), PUBLIC_INSTALL_DIR_NAME)
+    }
+'''
+new = '''    fun publicInstallRoot(appFilesDir: File): File? {
+        val path = appFilesDir.absolutePath
+        if (path.startsWith("/mnt/media_rw/")) return null
+        val idx = path.indexOf("/Android/data/")
+        if (idx <= 0) return null
+        return File(path.substring(0, idx), PUBLIC_INSTALL_DIR_NAME)
+    }
+'''
+if old not in s:
+    raise SystemExit('publicInstallRoot target not found')
+s = s.replace(old, new, 1)
+
+old = '''    fun ensureInstallRoot(dir: File): Boolean {
+        if (!dir.isDirectory && !dir.mkdirs()) return false
+        runCatching { File(dir, ".nomedia").createNewFile() }
+        return true
+    }
+'''
+new = '''    fun ensureInstallRoot(dir: File): Boolean {
+        if (!dir.isDirectory && !dir.mkdirs()) return false
+        val probe = File(dir, ".gn_write_probe_${System.nanoTime()}")
+        val writable = runCatching {
+            probe.writeText("ok")
+            probe.delete()
+            true
+        }.getOrDefault(false)
+        if (!writable) {
+            runCatching { probe.delete() }
+            return false
+        }
+        runCatching { File(dir, ".nomedia").createNewFile() }
+        return true
+    }
+'''
+if old not in s:
+    raise SystemExit('ensureInstallRoot target not found')
+s = s.replace(old, new, 1)
 
 old = '''                    val volumeDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         volume.directory
@@ -82,43 +132,22 @@ new = '''                    val roots = mutableListOf<File>()
                             (getPath.invoke(volume) as? String)?.let { roots.add(File(it)) }
                         } catch (_: Exception) { }
                     }
+
                     val uuid = volume.uuid
-                    if (!uuid.isNullOrBlank()) roots.add(File("/storage/$uuid"))
+                    if (!uuid.isNullOrBlank()) {
+                        roots.add(File("/storage/$uuid"))
+                        roots.add(File("/mnt/media_rw/$uuid"))
+                    }
+
                     for (volumeRoot in roots.distinctBy { it.absolutePath }) {
                         val appFilesDir = File(volumeRoot, "Android/data/${context.packageName}/files")
-                        if (!result.contains(appFilesDir) && (appFilesDir.exists() || appFilesDir.mkdirs())) {
+                        if (!result.contains(appFilesDir) && ensureInstallRoot(appFilesDir)) {
                             result.add(appFilesDir)
                         }
                     }
 '''
 if old not in s:
     raise SystemExit('StorageUtils target 2 not found')
-s = s.replace(old, new, 1)
-
-old = '''    fun ensureInstallRoot(dir: File): Boolean {
-        if (!dir.isDirectory && !dir.mkdirs()) return false
-        runCatching { File(dir, ".nomedia").createNewFile() }
-        return true
-    }
-'''
-new = '''    fun ensureInstallRoot(dir: File): Boolean {
-        if (!dir.isDirectory && !dir.mkdirs()) return false
-        val probe = File(dir, ".gn_write_probe_${System.nanoTime()}")
-        val writable = runCatching {
-            probe.writeText("ok")
-            probe.delete()
-            true
-        }.getOrDefault(false)
-        if (!writable) {
-            runCatching { probe.delete() }
-            return false
-        }
-        runCatching { File(dir, ".nomedia").createNewFile() }
-        return true
-    }
-'''
-if old not in s:
-    raise SystemExit('ensureInstallRoot target not found')
 s = s.replace(old, new, 1)
 write(storage_rel, s)
 
@@ -155,8 +184,8 @@ t = read(gradle_rel)
 old = '''        debug {
             isDebuggable = true'''
 new = '''        debug {
-            applicationIdSuffix = ".usbfixv3"
-            versionNameSuffix = "-usbfixv3"
+            applicationIdSuffix = ".usbfixv4"
+            versionNameSuffix = "-usbfixv4"
             isDebuggable = true'''
 if old not in t:
     raise SystemExit('build.gradle debug target not found')
@@ -165,9 +194,9 @@ write(gradle_rel, t.replace(old, new, 1))
 strings_rel = 'app/src/main/res/values/strings.xml'
 t = read(strings_rel)
 old_name = '<string name="app_name">GameNative</string>'
-new_name = '<string name="app_name">GameNative USB V3</string>'
+new_name = '<string name="app_name">GameNative USB V4</string>'
 if old_name not in t:
     raise SystemExit('app_name target not found')
 write(strings_rel, t.replace(old_name, new_name, 1))
 
-print('USB V3 patch applied: app-facing writable path only')
+print('USB V4 patch applied: Samsung detection restored; /mnt media_rw kept app-private and write-probed')
