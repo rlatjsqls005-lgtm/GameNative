@@ -12,7 +12,7 @@ new = '''    fun isExternalInstallTarget(storageManager: StorageManager?, appFil
         // /storage/<UUID> view. Treat that public removable mount as an install target.
         if (appFilesDir.absolutePath.startsWith("/mnt/media_rw/")) return true
 
-        val volume = runCatching { storageManager?.getStorageVolume(appFilesDir) }.getOrNull()
+        val volume = storageManager?.getStorageVolume(appFilesDir)
             ?: return runCatching { Environment.isExternalStorageRemovable(appFilesDir) }.getOrDefault(false)'''
 if old not in s:
     raise SystemExit("StorageUtils isExternalInstallTarget patch target not found")
