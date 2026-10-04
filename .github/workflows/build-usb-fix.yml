@@ -36,6 +36,15 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Create local.properties
+        run: |
+          cat > local.properties <<'EOF'
+          POSTHOG_API_KEY=
+          POSTHOG_HOST=https://us.i.posthog.com
+          STEAMGRIDDB_API_KEY=
+          CLOUD_PROJECT_NUMBER=
+          EOF
+
       - name: Apply Samsung USB OTG fix
         run: python3 .github/scripts/patch_usb_fix.py
 
