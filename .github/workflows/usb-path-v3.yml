@@ -5,6 +5,7 @@ on:
     branches: ["master"]
     paths:
       - '.github/workflows/usb-path-v3.yml'
+      - '.github/scripts/patch_usb_fix.py'
   workflow_dispatch:
 
 permissions:
@@ -16,8 +17,104 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Checkout fork tools
+        uses: actions/checkout@v4
+        with:
+          path: fork
+
       - name: Checkout clean upstream source
         uses: actions/checkout@v4
         with:
           repository: utkarshdalal/GameNative
-          ref: 8ea964fcfeddf37920305
+          ref: 8ea964fcfeddf37920305f14a49f98d1a0d45127
+          path: source
+          fetch-depth: 1
+
+      - name: Free disk and add swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
+          sudo fallocate -l 8G /mnt/swapfile.usbv3
+          sudo chmod 600 /mnt/swapfile.usbv3
+          sudo mkswap /mnt/swapfile.usbv3
+          sudo swapon /mnt/swapfile.usbv3
+          df -h /
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Configure build
+        working-directory: source
+        run: |
+          printf '%s\n' \
+            'POSTHOG_API_KEY=dummy' \
+            'POSTHOG_HOST=https://us.i.posthog.com' \
+            'STEAMGRIDDB_API_KEY=dummy' \
+            'CLOUD_PROJECT_NUMBER=dummy' \
+            > local.properties
+
+      - name: Apply USB V3 patch
+        run: python3 fork/.github/scripts/patch_usb_fix.py source
+
+      - name: Build signed debug APK
+        working-directory: source
+        run: |
+          chmod +x gradlew
+          ./gradlew -Pkotlin.daemon.jvmargs=-Xmx3g :app:assembleLegacyDebug --no-daemon
+          cp app/build/outputs/apk/legacy/debug/app-legacy-debug.apk GameNative-USB-V3.apk
+
+      - name: Verify APK
+        working-directory: source
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
+          "$APKSIGNER" verify --verbose --print-certs GameNative-USB-V3.apk
+          unzip -t GameNative-USB-V3.apk >/dev/null
+          sha256sum GameNative-USB-V3.apk | tee GameNative-USB-V3.sha256
+
+      - name: Split APK for delivery
+        working-directory: source
+        run: |
+          split -b 150M -d -a 2 GameNative-USB-V3.apk GameNative-USB-V3.apk.part-
+          ls -lh GameNative-USB-V3.apk*
+
+      - name: Upload checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-v3-checksum
+          path: source/GameNative-USB-V3.sha256
+          retention-days: 14
+
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-v3-part-00
+          path: source/GameNative-USB-V3.apk.part-00
+          retention-days: 14
+
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-v3-part-01
+          path: source/GameNative-USB-V3.apk.part-01
+          retention-days: 14
+
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-v3-part-02
+          path: source/GameNative-USB-V3.apk.part-02
+          retention-days: 14
+
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-v3-part-03
+          path: source/GameNative-USB-V3.apk.part-03
+          if-no-files-found: ignore
+          retention-days: 14
