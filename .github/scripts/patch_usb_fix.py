@@ -293,9 +293,14 @@ new_prepare = '''    fn prepare(manifest: &ContentManifest, target_dir: &str) ->
         let fresh_android_target = cfg!(target_os = "android")
             && fs::read_dir(target_dir)
                 .map(|entries| {
-                    entries
-                        .filter_map(Result::ok)
-                        .all(|entry| entry.file_name().to_string_lossy() == ".DepotDownloader")
+                    entries.filter_map(Result::ok).all(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        matches!(
+                            name.as_ref(),
+                            ".DepotDownloader" | ".DownloadInfo" | ".download_in_progress"
+                        )
+                    })
                 })
                 .unwrap_or(true);
         let mut slots = Vec::with_capacity(manifest.files.len());
@@ -320,6 +325,45 @@ new_existing = '''            let preexisting = if is_regular && !fresh_android_
 if old_existing not in t:
     raise SystemExit('preexisting metadata target not found')
 t = t.replace(old_existing, new_existing, 1)
+
+# Android USB exFAT/FUSE is reliable with one sequential Steam writer. The normal
+# multi-worker path writes several different files concurrently, which can wedge Samsung's
+# USB storage stack even though every individual file is append-only.
+old_workers = '''    plan.worker_count = clamp_worker_count(max_workers, plan.chunk_jobs.len());
+'''
+new_workers = '''    let android_usb_storage = cfg!(target_os = "android")
+        && target_dir.starts_with("/storage/")
+        && !target_dir.starts_with("/storage/emulated/");
+    plan.worker_count = if android_usb_storage {
+        clamp_worker_count(1, plan.chunk_jobs.len())
+    } else {
+        clamp_worker_count(max_workers, plan.chunk_jobs.len())
+    };
+'''
+if old_workers not in t:
+    raise SystemExit('Steam worker-count target not found')
+t = t.replace(old_workers, new_workers, 1)
+
+# exFAT has no Unix permission bits. Avoid an extra chmod round-trip (and vendor-specific
+# errors) every time a regular game file is created on USB storage.
+old_mode = '''#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+'''
+new_mode = '''#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> Result<(), String> {
+    if cfg!(target_os = "android") {
+        let display = path.to_string_lossy();
+        if display.starts_with("/storage/") && !display.starts_with("/storage/emulated/") {
+            let _ = mode;
+            return Ok(());
+        }
+    }
+    use std::os::unix::fs::PermissionsExt;
+'''
+if old_mode not in t:
+    raise SystemExit('Steam chmod target not found')
+t = t.replace(old_mode, new_mode, 1)
 
 # Explicit fsync is unnecessary for recoverable download state and can wedge on Android's
 # USB exFAT/FUSE stack. On Android, close the file normally; desktop keeps durability.
@@ -433,14 +477,14 @@ if old_config_sync not in t:
 write(config_rel, t.replace(old_config_sync, new_config_sync, 1))
 
 
-# V7 is separate from previous test APKs.
+# V8 is separate from previous test APKs.
 gradle_rel = 'app/build.gradle.kts'
 t = read(gradle_rel)
 old = '''        debug {
             isDebuggable = true'''
 new = '''        debug {
-            applicationIdSuffix = ".usbfixv7"
-            versionNameSuffix = "-usbfixv7"
+            applicationIdSuffix = ".usbfixv8"
+            versionNameSuffix = "-usbfixv8"
             isDebuggable = true'''
 if old not in t:
     raise SystemExit('build.gradle debug target not found')
@@ -449,9 +493,9 @@ write(gradle_rel, t.replace(old, new, 1))
 strings_rel = 'app/src/main/res/values/strings.xml'
 t = read(strings_rel)
 old_name = '<string name="app_name">GameNative</string>'
-new_name = '<string name="app_name">GameNative USB V7</string>'
+new_name = '<string name="app_name">GameNative USB V8</string>'
 if old_name not in t:
     raise SystemExit('app_name target not found')
 write(strings_rel, t.replace(old_name, new_name, 1))
 
-print('USB V7 patch applied: Samsung OTG + permission flow + exFAT/FUSE startup + writer fallback')
+print('USB V8 patch applied: Samsung OTG + permission flow + exFAT/FUSE startup + writer fallback')
