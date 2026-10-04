@@ -1,0 +1,62 @@
+name: Split USB Fix APK
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - '.github/workflows/split-usb-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built USB Fix APK
+        uses: actions/download-artifact@v4
+        with:
+          name: GameNative-USB-Fix
+          path: input
+          github-token: ${{ github.token }}
+          repository: rlatjsqls005-lgtm/GameNative
+          run-id: 37181698041
+
+      - name: Split APK into delivery chunks
+        run: |
+          ls -lh input
+          split -b 180M -d -a 2 input/GameNative-USB-Fix.apk GameNative-USB-Fix.apk.part-
+          sha256sum input/GameNative-USB-Fix.apk > GameNative-USB-Fix.apk.sha256
+          ls -lh GameNative-USB-Fix.apk.part-* GameNative-USB-Fix.apk.sha256
+
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-fix-part-00
+          path: GameNative-USB-Fix.apk.part-00
+          compression-level: 0
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-fix-part-01
+          path: GameNative-USB-Fix.apk.part-01
+          compression-level: 0
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-fix-part-02
+          path: GameNative-USB-Fix.apk.part-02
+          compression-level: 0
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-fix-part-03
+          path: GameNative-USB-Fix.apk.part-03
+          compression-level: 0
+      - name: Upload checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-fix-checksum
+          path: GameNative-USB-Fix.apk.sha256
